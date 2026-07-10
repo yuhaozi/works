@@ -1,0 +1,4 @@
+interface:
+  display_name: "婚纱模特视频剪辑"
+  short_description: "婚纱模特短视频的稳定构图、美颜、特效、卡点与超清导出流程"
+  default_prompt: "Use $wedding-model-video-editing to edit my bridal-model footage into a polished short video."
