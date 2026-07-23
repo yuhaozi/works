@@ -1,7 +1,7 @@
 From d58c597ca59157241fbc3e191d6b19814346c9a8 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?=E4=BD=99=E6=98=8A?= <yuhao@yuhaodeMac-mini.local>
 Date: Thu, 23 Jul 2026 04:43:59 +0800
-Subject: [PATCH] feat(ipq32): add DNS Guard encrypted DNS modes
+Subject: [PATCH 1/2] feat(ipq32): add DNS Guard encrypted DNS modes
 
 ---
  DNS_GUARD_IPQ32.md                  |  38 +++++++++
@@ -611,6 +611,305 @@ index 0000000..133b574
 +fi
 +
 +echo "DNS Guard tests passed"
+-- 
+2.50.1 (Apple Git-155)
+
+
+From f7235b1a70b17ef68f82a09550abe9f783e4d3d4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E4=BD=99=E6=98=8A?= <yuhao@yuhaodeMac-mini.local>
+Date: Thu, 23 Jul 2026 13:11:35 +0800
+Subject: [PATCH 2/2] feat(ipq32): prefer DoH for DNS Guard
+
+---
+ DNS_GUARD_IPQ32.md                  | 13 +++--
+ fancyss/scripts/ss_base_dns.sh      | 75 ++++++++++++++++++++++++-----
+ fancyss/ss/ssconfig.sh              | 12 ++++-
+ fancyss/webs/Module_shadowsocks.asp |  2 +-
+ tests/test_dns_guard.sh             | 24 +++++++--
+ 5 files changed, 103 insertions(+), 23 deletions(-)
+
+diff --git a/DNS_GUARD_IPQ32.md b/DNS_GUARD_IPQ32.md
+index 57aedaf..8db885a 100644
+--- a/DNS_GUARD_IPQ32.md
++++ b/DNS_GUARD_IPQ32.md
+@@ -8,16 +8,19 @@ package MD5 is `5519268d19fa1895456b19a4a03032d7`.
+ ## Modes
+ 
+ - Off: fancyss keeps the user's existing DNS plan and upstream selections.
+-- Standard: fancyss switches to SmartDNS, uses encrypted DNS-over-TLS upstreams,
+-  redirects LAN TCP/UDP port 53 to the router, and blocks unresolved IPv4/IPv6
+-  plaintext DNS forwarding.
++- Standard: fancyss switches to SmartDNS, uses DNS-over-HTTPS on port 443 as
++  the primary encrypted upstream and DNS-over-TLS on port 853 as an automatic
++  fallback, redirects LAN TCP/UDP port 53 to the router, and blocks unresolved
++  IPv4/IPv6 plaintext DNS forwarding.
+ - Strict: includes Standard mode and also blocks plaintext TCP/UDP port 53 from
+   router-originated traffic. Local loopback DNS remains allowed.
+ 
+ The encrypted upstreams use fixed bootstrap IP addresses, so starting DNS Guard
+ does not require a plaintext DNS lookup first. The domestic group uses Alibaba
+-DNS and DNSPod directly. The foreign group uses Cloudflare and Google through
+-the active fancyss proxy.
++DNS and DNSPod directly over DoH, with their DoT services as fallbacks. The
++foreign group uses Cloudflare and Google DoH through the active fancyss proxy,
++again with DoT fallbacks. Port 443 is the primary path because it remains usable
++on networks that block or interfere with the dedicated DoT port.
+ 
+ ## Installation
+ 
+diff --git a/fancyss/scripts/ss_base_dns.sh b/fancyss/scripts/ss_base_dns.sh
+index 41bd580..1a6524c 100644
+--- a/fancyss/scripts/ss_base_dns.sh
++++ b/fancyss/scripts/ss_base_dns.sh
+@@ -596,11 +596,35 @@ smartdns_dns_guard_group_json() {
+ 			{
+ 			  version: 1,
+ 			  items: [
++			    {
++			      id: "doh_dns_alidns_com_223_5_5_5_443",
++			      proto: "doh",
++			      provider: "Alibaba DNS",
++			      description: "DNS Guard DoH primary",
++			      kind: "preset",
++			      host: "https://dns.alidns.com/dns-query",
++			      host_ip: "223.5.5.5",
++			      port: 443,
++			      isp: 0,
++			      net: "ipv4"
++			    },
++			    {
++			      id: "doh_doh_pub_1_12_12_21_443",
++			      proto: "doh",
++			      provider: "DNSPod",
++			      description: "DNS Guard DoH primary",
++			      kind: "preset",
++			      host: "https://doh.pub/dns-query",
++			      host_ip: "1.12.12.21",
++			      port: 443,
++			      isp: 0,
++			      net: "ipv4"
++			    },
+ 			    {
+ 			      id: "dot_dns_alidns_com_223_5_5_5_853",
+ 			      proto: "dot",
+ 			      provider: "Alibaba DNS",
+-			      description: "DNS Guard encrypted primary",
++			      description: "DNS Guard DoT fallback",
+ 			      kind: "preset",
+ 			      host: "dns.alidns.com",
+ 			      host_ip: "223.5.5.5",
+@@ -612,7 +636,7 @@ smartdns_dns_guard_group_json() {
+ 			      id: "dot_dot_pub_1_12_12_21_853",
+ 			      proto: "dot",
+ 			      provider: "DNSPod",
+-			      description: "DNS Guard encrypted backup",
++			      description: "DNS Guard DoT fallback",
+ 			      kind: "preset",
+ 			      host: "dot.pub",
+ 			      host_ip: "1.12.12.21",
+@@ -628,11 +652,35 @@ smartdns_dns_guard_group_json() {
+ 			{
+ 			  version: 1,
+ 			  items: [
++			    {
++			      id: "doh_cloudflare_dns_com_1_1_1_1_443",
++			      proto: "doh",
++			      provider: "Cloudflare",
++			      description: "DNS Guard DoH primary via proxy",
++			      kind: "preset",
++			      host: "https://cloudflare-dns.com/dns-query",
++			      host_ip: "1.1.1.1",
++			      port: 443,
++			      isp: 0,
++			      net: "ipv4"
++			    },
++			    {
++			      id: "doh_dns_google_8_8_8_8_443",
++			      proto: "doh",
++			      provider: "Google",
++			      description: "DNS Guard DoH primary via proxy",
++			      kind: "preset",
++			      host: "https://dns.google/dns-query",
++			      host_ip: "8.8.8.8",
++			      port: 443,
++			      isp: 0,
++			      net: "ipv4"
++			    },
+ 			    {
+ 			      id: "dot_one_one_one_one_1_1_1_1_853",
+ 			      proto: "dot",
+ 			      provider: "Cloudflare",
+-			      description: "DNS Guard encrypted primary via proxy",
++			      description: "DNS Guard DoT fallback via proxy",
+ 			      kind: "preset",
+ 			      host: "one.one.one.one",
+ 			      host_ip: "1.1.1.1",
+@@ -644,7 +692,7 @@ smartdns_dns_guard_group_json() {
+ 			      id: "dot_dns_google_8_8_8_8_853",
+ 			      proto: "dot",
+ 			      provider: "Google",
+-			      description: "DNS Guard encrypted backup via proxy",
++			      description: "DNS Guard DoT fallback via proxy",
+ 			      kind: "preset",
+ 			      host: "dns.google",
+ 			      host_ip: "8.8.8.8",
+@@ -668,12 +716,13 @@ smartdns_validate_group_value() {
+ 		(.items | length > 0) and
+ 		(.items | length <= 16) and
+ 		all(.items[];
+-			(.proto == "udp" or .proto == "tcp" or .proto == "dot") and
++			(.proto == "udp" or .proto == "tcp" or .proto == "dot" or .proto == "doh") and
+ 			(
+ 				((.kind // "preset") == "isp" and ((.slot | tostring) == "1" or (.slot | tostring) == "2")) or
+ 				((.kind // "preset") == "preset" and (
+ 					((.proto == "udp" or .proto == "tcp") and ((.addr // "") != "")) or
+-					(.proto == "dot" and ((.host // "") != "") and ((.host_ip // "") != ""))
++					(.proto == "dot" and ((.host // "") != "") and ((.host_ip // "") != "")) or
++					(.proto == "doh" and ((.host // "") | startswith("https://")) and ((.host_ip // "") != ""))
+ 				))
+ 			)
+ 		)
+@@ -718,10 +767,12 @@ EOF
+ 		port="53"
+ 		net="$(echo "${addr}" | grep -q ':' && echo ipv6 || echo ipv4)"
+ 	fi
+-	if [ "${proto}" = "dot" ];then
++	if [ "${proto}" = "dot" ] || [ "${proto}" = "doh" ];then
+ 		[ -n "${host}" ] || return 1
+ 		[ -n "${host_ip}" ] || return 1
+-		[ -n "${port}" ] || port="853"
++		if [ -z "${port}" ];then
++			[ "${proto}" = "doh" ] && port="443" || port="853"
++		fi
+ 	else
+ 		[ -n "${addr}" ] || return 1
+ 		[ -n "${port}" ] || port="53"
+@@ -741,7 +792,7 @@ smartdns_group_items_tsv() {
+ 	local tmp_file=""
+ 
+ 	eval "value=\${${key}}"
+-	cache_key="$(printf '%s' "v1|${group}|${value}|guard=${ss_basic_dns_guard_mode:-0}|$(smartdns_should_seed_isp_defaults)|$(smartdns_get_isp_dns_slot 1)|$(smartdns_get_isp_dns_slot 2)" | md5sum | awk '{print $1}')"
++	cache_key="$(printf '%s' "v2|${group}|${value}|guard=${ss_basic_dns_guard_mode:-0}|$(smartdns_should_seed_isp_defaults)|$(smartdns_get_isp_dns_slot 1)|$(smartdns_get_isp_dns_slot 2)" | md5sum | awk '{print $1}')"
+ 	cache_file="/tmp/fss_smartdns_items_${cache_key}.tsv"
+ 	if [ -s "${cache_file}" ];then
+ 		cat "${cache_file}"
+@@ -785,10 +836,12 @@ smartdns_group_items_tsv() {
+ 			port="53"
+ 			net="$(echo "${addr}" | grep -q ':' && echo ipv6 || echo ipv4)"
+ 		fi
+-		if [ "${proto}" = "dot" ];then
++		if [ "${proto}" = "dot" ] || [ "${proto}" = "doh" ];then
+ 			[ -n "${host}" ] || continue
+ 			[ -n "${host_ip}" ] || continue
+-			[ -n "${port}" ] || port="853"
++			if [ -z "${port}" ];then
++				[ "${proto}" = "doh" ] && port="443" || port="853"
++			fi
+ 		else
+ 			[ -n "${addr}" ] || continue
+ 			[ -n "${port}" ] || port="53"
+diff --git a/fancyss/ss/ssconfig.sh b/fancyss/ss/ssconfig.sh
+index 895288f..aacc602 100755
+--- a/fancyss/ss/ssconfig.sh
++++ b/fancyss/ss/ssconfig.sh
+@@ -1698,6 +1698,9 @@ smartdns_append_server_line() {
+ 	if [ "${use_proxy}" = "1" ];then
+ 		extras="${extras} -proxy fancy_proxy"
+ 	fi
++	if dns_guard_enabled && [ "${proto}" = "dot" ];then
++		extras="${extras} -fallback"
++	fi
+ 	case "${proto}" in
+ 	udp)
+ 		line="server $(smartdns_format_addr "${addr}" "${port}")"
+@@ -1705,6 +1708,9 @@ smartdns_append_server_line() {
+ 	tcp)
+ 		line="server-tcp $(smartdns_format_addr "${addr}" "${port}")"
+ 		;;
++	doh)
++		line="server-https ${host}"
++		;;
+ 	dot)
+ 		line="server-tls ${host}"
+ 		;;
+@@ -1713,8 +1719,10 @@ smartdns_append_server_line() {
+ 		;;
+ 	esac
+ 	[ -n "${extras}" ] && line="${line} ${extras}"
+-	if [ "${proto}" = "dot" ];then
++	if [ "${proto}" = "dot" ] || [ "${proto}" = "doh" ];then
+ 		line="${line} -host-ip ${host_ip}"
++	fi
++	if [ "${proto}" = "dot" ];then
+ 		if [ -n "${port}" ] && [ "${port}" != "853" ];then
+ 			line="${line} -port ${port}"
+ 		fi
+@@ -1760,7 +1768,7 @@ EOF
+ 		fi
+ 		if [ "${append_count}" -eq 0 ];then
+ 			smartdns_append_server_line "${outfile}" "tcp" "8.8.8.8" "53" "" "" "${flags}" "${use_proxy}"
+-			echo_date "⚠️smartdns ${scope}：gfw 组没有可用 TCP/DoT DNS，已使用 tcp://8.8.8.8 兜底。"
++			echo_date "⚠️smartdns ${scope}：gfw 组没有可用 TCP/DoH/DoT DNS，已使用 tcp://8.8.8.8 兜底。"
+ 		fi
+ 	fi
+ }
+diff --git a/fancyss/webs/Module_shadowsocks.asp b/fancyss/webs/Module_shadowsocks.asp
+index 37f59a4..f5161d7 100644
+--- a/fancyss/webs/Module_shadowsocks.asp
++++ b/fancyss/webs/Module_shadowsocks.asp
+@@ -17138,7 +17138,7 @@ function toggleKeyMask(o, show){
+ 															['1', '标准模式（推荐）'],
+ 															['2', '严格模式']
+ 														], style:'width:180px;', value:'0'},
+-														{ suffix:'&nbsp;&nbsp;<small>自动使用SmartDNS + DoT；严格模式额外封锁路由器明文53端口</small>'}
++														{ suffix:'&nbsp;&nbsp;<small>自动使用SmartDNS + DoH 443，DoT 853故障备用；严格模式额外封锁路由器明文53端口</small>'}
+ 													]},
+ 													{ title: 'DNS重定向', id:'ss_basic_dns_hijack', type:'checkbox', hint:'106', value:true},
+ 															{ title: 'DNS解析测试', rid: 'ss_dns_test', multi: [
+diff --git a/tests/test_dns_guard.sh b/tests/test_dns_guard.sh
+index 133b574..e285ad3 100755
+--- a/tests/test_dns_guard.sh
++++ b/tests/test_dns_guard.sh
+@@ -32,19 +32,35 @@ chn_json=$(smartdns_group_json chn)
+ gfw_json=$(smartdns_group_json gfw)
+ 
+ printf '%s' "${chn_json}" | jq -e '
+-	(.items | length) == 2 and
+-	all(.items[]; .proto == "dot" and .port == 853 and (.host_ip | length) > 0)
++	(.items | length) == 4 and
++	([.items[] | select(.proto == "doh" and .port == 443 and (.host | startswith("https://")) and (.host_ip | length) > 0)] | length) == 2 and
++	([.items[] | select(.proto == "dot" and .port == 853 and (.host_ip | length) > 0)] | length) == 2
+ ' >/dev/null
+ 
+ printf '%s' "${gfw_json}" | jq -e '
+-	(.items | length) == 2 and
+-	all(.items[]; .proto == "dot" and .port == 853 and (.host_ip | length) > 0)
++	(.items | length) == 4 and
++	([.items[] | select(.proto == "doh" and .port == 443 and (.host | startswith("https://")) and (.host_ip | length) > 0)] | length) == 2 and
++	([.items[] | select(.proto == "dot" and .port == 853 and (.host_ip | length) > 0)] | length) == 2
+ ' >/dev/null
+ 
+ grep -q 'ss_basic_dns_guard_mode' "${ROOT_DIR}/fancyss/webs/Module_shadowsocks.asp"
+ grep -q 'dns_guard_filter_control' "${ROOT_DIR}/fancyss/ss/ssconfig.sh"
++grep -q 'line="server-https \${host}"' "${ROOT_DIR}/fancyss/ss/ssconfig.sh"
+ grep -q 'line="server-tls \${host}"' "${ROOT_DIR}/fancyss/ss/ssconfig.sh"
+ grep -q 'line="\${line} -host-ip \${host_ip}"' "${ROOT_DIR}/fancyss/ss/ssconfig.sh"
++grep -q 'extras="\${extras} -fallback"' "${ROOT_DIR}/fancyss/ss/ssconfig.sh"
++
++eval "$(sed -n '/^smartdns_append_server_line() {/,/^smartdns_append_group_servers() {/p' "${ROOT_DIR}/fancyss/ss/ssconfig.sh" | sed '$d')"
++
++SMARTDNS_CONF="${TMP_DIR}/smartdns.conf"
++: > "${SMARTDNS_CONF}"
++smartdns_append_server_line "${SMARTDNS_CONF}" "doh" "" "443" "https://dns.alidns.com/dns-query" "223.5.5.5" "-group chn" "0"
++smartdns_append_server_line "${SMARTDNS_CONF}" "doh" "" "443" "https://cloudflare-dns.com/dns-query" "1.1.1.1" "-group gfw" "1"
++smartdns_append_server_line "${SMARTDNS_CONF}" "dot" "" "853" "dns.alidns.com" "223.5.5.5" "-group chn" "0"
++
++grep -q '^server-https https://dns.alidns.com/dns-query -group chn -host-ip 223.5.5.5$' "${SMARTDNS_CONF}"
++grep -q '^server-https https://cloudflare-dns.com/dns-query -group gfw -proxy fancy_proxy -host-ip 1.1.1.1$' "${SMARTDNS_CONF}"
++grep -q '^server-tls dns.alidns.com -group chn -fallback -host-ip 223.5.5.5$' "${SMARTDNS_CONF}"
+ 
+ FW_LOG="${TMP_DIR}/firewall.log"
+ : > "${FW_LOG}"
 -- 
 2.50.1 (Apple Git-155)
 
