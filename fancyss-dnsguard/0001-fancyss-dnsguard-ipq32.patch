@@ -1,0 +1,616 @@
+From d58c597ca59157241fbc3e191d6b19814346c9a8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E4=BD=99=E6=98=8A?= <yuhao@yuhaodeMac-mini.local>
+Date: Thu, 23 Jul 2026 04:43:59 +0800
+Subject: [PATCH] feat(ipq32): add DNS Guard encrypted DNS modes
+
+---
+ DNS_GUARD_IPQ32.md                  |  38 +++++++++
+ build_dns_guard_ipq32.sh            |  76 ++++++++++++++++++
+ fancyss/scripts/ss_base_dns.sh      |  87 ++++++++++++++++++++-
+ fancyss/ss/ssconfig.sh              | 115 ++++++++++++++++++++++++----
+ fancyss/webs/Module_shadowsocks.asp |  17 +++-
+ tests/test_dns_guard.sh             | 108 ++++++++++++++++++++++++++
+ 6 files changed, 423 insertions(+), 18 deletions(-)
+ create mode 100644 DNS_GUARD_IPQ32.md
+ create mode 100755 build_dns_guard_ipq32.sh
+ create mode 100755 tests/test_dns_guard.sh
+
+diff --git a/DNS_GUARD_IPQ32.md b/DNS_GUARD_IPQ32.md
+new file mode 100644
+index 0000000..57aedaf
+--- /dev/null
++++ b/DNS_GUARD_IPQ32.md
+@@ -0,0 +1,38 @@
++# fancyss DNS Guard for IPQ32
++
++This build is based on fancyss 3.5.30, upstream commit
++`b19e82cb6a05e08990a96905353921819d44d134`, and targets the 32-bit QCA
++IPQ53xx package used by ASUS ZenWiFi BD4 (IPQ5322, ARMv7). The official base
++package MD5 is `5519268d19fa1895456b19a4a03032d7`.
++
++## Modes
++
++- Off: fancyss keeps the user's existing DNS plan and upstream selections.
++- Standard: fancyss switches to SmartDNS, uses encrypted DNS-over-TLS upstreams,
++  redirects LAN TCP/UDP port 53 to the router, and blocks unresolved IPv4/IPv6
++  plaintext DNS forwarding.
++- Strict: includes Standard mode and also blocks plaintext TCP/UDP port 53 from
++  router-originated traffic. Local loopback DNS remains allowed.
++
++The encrypted upstreams use fixed bootstrap IP addresses, so starting DNS Guard
++does not require a plaintext DNS lookup first. The domestic group uses Alibaba
++DNS and DNSPod directly. The foreign group uses Cloudflare and Google through
++the active fancyss proxy.
++
++## Installation
++
++Upload `fancyss_ipq32_full_dnsguard.tar.gz` through the router software center's
++offline installation page. Installation does not download any components.
++
++Start with Standard mode. Use Strict mode only after Standard mode has been
++confirmed working with the active node and the router has a correct system time.
++
++## Rollback
++
++Select Off and apply the fancyss settings. Disabling or uninstalling fancyss
++also removes all DNS Guard chains because they use the normal fancyss firewall
++lifecycle and `SHADOWSOCKS*` chain namespace.
++
++This build has been statically checked and package-verified on macOS, but still
++requires acceptance testing on a physical BD4 before it should be treated as a
++production release.
+diff --git a/build_dns_guard_ipq32.sh b/build_dns_guard_ipq32.sh
+new file mode 100755
+index 0000000..8723f42
+--- /dev/null
++++ b/build_dns_guard_ipq32.sh
+@@ -0,0 +1,76 @@
++#!/usr/bin/env bash
++
++set -euo pipefail
++
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++BASE_PACKAGE="${1:-${ROOT_DIR}/packages/fancyss_ipq32_full.tar.gz}"
++OUTPUT_PACKAGE="${2:-${ROOT_DIR}/packages/fancyss_ipq32_full_dnsguard.tar.gz}"
++STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fancyss-dnsguard-ipq32.XXXXXX")"
++
++cleanup() {
++	rm -rf "${STAGE_DIR}"
++}
++trap cleanup EXIT INT TERM
++
++require_file() {
++	if [[ ! -f "$1" ]]; then
++		echo "Missing required file: $1" >&2
++		exit 1
++	fi
++}
++
++require_file "${BASE_PACKAGE}"
++require_file "${ROOT_DIR}/fancyss/scripts/ss_base_dns.sh"
++require_file "${ROOT_DIR}/fancyss/ss/ssconfig.sh"
++require_file "${ROOT_DIR}/fancyss/webs/Module_shadowsocks.asp"
++
++if ! tar -tzf "${BASE_PACKAGE}" | grep -qx 'shadowsocks/install.sh'; then
++	echo "The base archive is not a fancyss offline package: ${BASE_PACKAGE}" >&2
++	exit 1
++fi
++
++tar -xzf "${BASE_PACKAGE}" -C "${STAGE_DIR}"
++install -m 0755 "${ROOT_DIR}/fancyss/scripts/ss_base_dns.sh" "${STAGE_DIR}/shadowsocks/scripts/ss_base_dns.sh"
++install -m 0755 "${ROOT_DIR}/fancyss/ss/ssconfig.sh" "${STAGE_DIR}/shadowsocks/ss/ssconfig.sh"
++install -m 0644 "${ROOT_DIR}/fancyss/webs/Module_shadowsocks.asp" "${STAGE_DIR}/shadowsocks/webs/Module_shadowsocks.asp"
++install -m 0644 "${ROOT_DIR}/DNS_GUARD_IPQ32.md" "${STAGE_DIR}/shadowsocks/ss/DNS_GUARD_IPQ32.md"
++
++mkdir -p "$(dirname "${OUTPUT_PACKAGE}")"
++rm -f "${OUTPUT_PACKAGE}" "${OUTPUT_PACKAGE}.sha256" "${OUTPUT_PACKAGE}.md5"
++COPYFILE_DISABLE=1 tar -czf "${OUTPUT_PACKAGE}" -C "${STAGE_DIR}" shadowsocks
++
++if tar -tzf "${OUTPUT_PACKAGE}" | grep -Eq '(^|/)\._|__MACOSX'; then
++	echo "AppleDouble metadata was found in the output archive" >&2
++	exit 1
++fi
++
++for required_path in \
++	shadowsocks/install.sh \
++	shadowsocks/bin/smartdns \
++	shadowsocks/bin/xray \
++	shadowsocks/scripts/ss_base_dns.sh \
++	shadowsocks/ss/ssconfig.sh \
++	shadowsocks/webs/Module_shadowsocks.asp \
++	shadowsocks/ss/DNS_GUARD_IPQ32.md
++do
++	if ! tar -tzf "${OUTPUT_PACKAGE}" | grep -qx "${required_path}"; then
++		echo "Output archive is missing ${required_path}" >&2
++		exit 1
++	fi
++done
++
++if command -v sha256sum >/dev/null 2>&1; then
++	sha256sum "${OUTPUT_PACKAGE}" > "${OUTPUT_PACKAGE}.sha256"
++else
++	shasum -a 256 "${OUTPUT_PACKAGE}" > "${OUTPUT_PACKAGE}.sha256"
++fi
++
++if command -v md5sum >/dev/null 2>&1; then
++	md5sum "${OUTPUT_PACKAGE}" > "${OUTPUT_PACKAGE}.md5"
++else
++	md5 -r "${OUTPUT_PACKAGE}" > "${OUTPUT_PACKAGE}.md5"
++fi
++
++echo "Built: ${OUTPUT_PACKAGE}"
++echo "SHA-256: $(awk '{print $1}' "${OUTPUT_PACKAGE}.sha256")"
++
+diff --git a/fancyss/scripts/ss_base_dns.sh b/fancyss/scripts/ss_base_dns.sh
+index f5cc034..41bd580 100644
+--- a/fancyss/scripts/ss_base_dns.sh
++++ b/fancyss/scripts/ss_base_dns.sh
+@@ -577,6 +577,87 @@ smartdns_default_group_json() {
+ 	esac
+ }
+ 
++dns_guard_enabled() {
++	case "${ss_basic_dns_guard_mode}" in
++	1|2)
++		return 0
++		;;
++	*)
++		return 1
++		;;
++	esac
++}
++
++smartdns_dns_guard_group_json() {
++	local group="$1"
++	case "${group}" in
++	chn)
++		run jq -cn '
++			{
++			  version: 1,
++			  items: [
++			    {
++			      id: "dot_dns_alidns_com_223_5_5_5_853",
++			      proto: "dot",
++			      provider: "Alibaba DNS",
++			      description: "DNS Guard encrypted primary",
++			      kind: "preset",
++			      host: "dns.alidns.com",
++			      host_ip: "223.5.5.5",
++			      port: 853,
++			      isp: 0,
++			      net: "ipv4"
++			    },
++			    {
++			      id: "dot_dot_pub_1_12_12_21_853",
++			      proto: "dot",
++			      provider: "DNSPod",
++			      description: "DNS Guard encrypted backup",
++			      kind: "preset",
++			      host: "dot.pub",
++			      host_ip: "1.12.12.21",
++			      port: 853,
++			      isp: 0,
++			      net: "ipv4"
++			    }
++			  ]
++			}'
++		;;
++	gfw)
++		run jq -cn '
++			{
++			  version: 1,
++			  items: [
++			    {
++			      id: "dot_one_one_one_one_1_1_1_1_853",
++			      proto: "dot",
++			      provider: "Cloudflare",
++			      description: "DNS Guard encrypted primary via proxy",
++			      kind: "preset",
++			      host: "one.one.one.one",
++			      host_ip: "1.1.1.1",
++			      port: 853,
++			      isp: 0,
++			      net: "ipv4"
++			    },
++			    {
++			      id: "dot_dns_google_8_8_8_8_853",
++			      proto: "dot",
++			      provider: "Google",
++			      description: "DNS Guard encrypted backup via proxy",
++			      kind: "preset",
++			      host: "dns.google",
++			      host_ip: "8.8.8.8",
++			      port: 853,
++			      isp: 0,
++			      net: "ipv4"
++			    }
++			  ]
++			}'
++		;;
++	esac
++}
++
+ smartdns_validate_group_value() {
+ 	local group="$1"
+ 	local value="$2"
+@@ -603,6 +684,10 @@ smartdns_group_json() {
+ 	local group="$1"
+ 	local key="ss_basic_smrt_${group}_dns"
+ 	local value
++	if dns_guard_enabled; then
++		smartdns_dns_guard_group_json "${group}"
++		return
++	fi
+ 	eval "value=\${${key}}"
+ 	if smartdns_validate_group_value "${group}" "${value}"; then
+ 		smartdns_decode_json_value "${value}"
+@@ -656,7 +741,7 @@ smartdns_group_items_tsv() {
+ 	local tmp_file=""
+ 
+ 	eval "value=\${${key}}"
+-	cache_key="$(printf '%s' "v1|${group}|${value}|$(smartdns_should_seed_isp_defaults)|$(smartdns_get_isp_dns_slot 1)|$(smartdns_get_isp_dns_slot 2)" | md5sum | awk '{print $1}')"
++	cache_key="$(printf '%s' "v1|${group}|${value}|guard=${ss_basic_dns_guard_mode:-0}|$(smartdns_should_seed_isp_defaults)|$(smartdns_get_isp_dns_slot 1)|$(smartdns_get_isp_dns_slot 2)" | md5sum | awk '{print $1}')"
+ 	cache_file="/tmp/fss_smartdns_items_${cache_key}.tsv"
+ 	if [ -s "${cache_file}" ];then
+ 		cat "${cache_file}"
+diff --git a/fancyss/ss/ssconfig.sh b/fancyss/ss/ssconfig.sh
+index 7d1b1cf..895288f 100755
+--- a/fancyss/ss/ssconfig.sh
++++ b/fancyss/ss/ssconfig.sh
+@@ -666,6 +666,23 @@ prepare_system() {
+ 	# Default enabled in UI: block QUIC to avoid HTTP/3 direct-connect bypassing TCP-only proxy.
+ 	set_default "ss_basic_block_quic" "1"
+ 	set_default "ss_basic_proxy_ipv6" "0"
++	set_default "ss_basic_dns_guard_mode" "0"
++	case "${ss_basic_dns_guard_mode}" in
++	1|2)
++		if [ "${ss_basic_dns_plan}" != "2" ];then
++			echo_date "DNS Guard：自动切换到smartdns加密DNS方案。"
++			ss_basic_dns_plan="2"
++			dbus set ss_basic_dns_plan="2"
++		fi
++		if [ "${ss_basic_dns_hijack}" != "1" ];then
++			ss_basic_dns_hijack="1"
++			dbus set ss_basic_dns_hijack="1"
++		fi
++		;;
++	*)
++		ss_basic_dns_guard_mode="0"
++		;;
++	esac
+ 	normalize_server_resolv_mode
+ 	
+ 	# 0. set skin, 不管是否能启动成功，都检测下皮肤是否正确，如果不对，则设置下皮肤
+@@ -5929,6 +5946,12 @@ lan_access_control() {
+ 
+ dns_hijack_control() {
+ 	local type=${1:-4}
++	local protocols="udp"
++	case "${ss_basic_dns_guard_mode}" in
++	1|2)
++		protocols="udp tcp"
++		;;
++	esac
+ 	if [ "${type}" == "4" ];then
+ 		local iptab=iptables
+ 		local chain_prefix=SHADOWSOCKS_DNS
+@@ -5937,7 +5960,7 @@ dns_hijack_control() {
+ 		local chain_prefix=SHADOWSOCKS6_DNS
+ 	fi
+ 	
+-	if [ "$ss_basic_dns_hijack" == "1" ]; then
++	if [ "$ss_basic_dns_hijack" == "1" ] || [ "${ss_basic_dns_guard_mode}" = "1" ] || [ "${ss_basic_dns_guard_mode}" = "2" ]; then
+ 		for VLAN_INDEX in ${VLAN_INDEXS}
+ 		do
+ 			if [ "${type}" == "4" ];then
+@@ -5957,11 +5980,15 @@ dns_hijack_control() {
+ 					if [ "${proxy_mode}" == "0" ]; then
+ 						if [ "${type}" == "4" ];then
+ 							local source_rule=$(get_acl_source_rule4 ${acl})
+-							${iptab} -t nat -A ${chain_prefix}_${VLAN_INDEX} ${source_rule} -p udp -j RETURN
++							for protocol in ${protocols}; do
++								${iptab} -t nat -A ${chain_prefix}_${VLAN_INDEX} ${source_rule} -p ${protocol} -j RETURN
++							done
+ 						else
+ 							local source_rule6=$(get_acl_source_rule6 ${acl})
+ 							if [ -n "${source_rule6}" ]; then
+-								${iptab} -t nat -A ${chain_prefix}_${VLAN_INDEX} ${source_rule6} -p udp -j RETURN
++								for protocol in ${protocols}; do
++									${iptab} -t nat -A ${chain_prefix}_${VLAN_INDEX} ${source_rule6} -p ${protocol} -j RETURN
++								done
+ 							elif acl_is_cidr_rule "${ipaddr}"; then
+ 								echo_date "IPv6 DNS劫持：ACL【${ipaddr}】为CIDR规则，无法按设备豁免DNS劫持，继续按IPv6默认DNS规则处理。"
+ 							else
+@@ -5971,15 +5998,66 @@ dns_hijack_control() {
+ 					fi
+ 				done
+ 			fi
+-			if [ "${type}" == "4" ];then
+-				${iptab} -t nat -A ${chain_prefix}_${VLAN_INDEX} -p udp -j DNAT --to ${dest_ipaddr}:53
+-			else
+-				${iptab} -t nat -A ${chain_prefix}_${VLAN_INDEX} -p udp -j DNAT --to-destination [${dest_ipaddr}]:53
+-			fi
++			for protocol in ${protocols}; do
++				if [ "${type}" == "4" ];then
++					${iptab} -t nat -A ${chain_prefix}_${VLAN_INDEX} -p ${protocol} -j DNAT --to ${dest_ipaddr}:53
++				else
++					${iptab} -t nat -A ${chain_prefix}_${VLAN_INDEX} -p ${protocol} -j DNAT --to-destination [${dest_ipaddr}]:53
++				fi
++			done
+ 		done
+ 	fi
+ }
+ 
++dns_guard_filter_control() {
++	case "${ss_basic_dns_guard_mode}" in
++	1|2)
++		;;
++	*)
++		return 0
++		;;
++	esac
++
++	echo_date "DNS Guard：阻止局域网通过IPv4/IPv6明文DNS外泄..."
++	ensure_chain filter SHADOWSOCKS_DNS_GUARD || return 1
++	append_if_not_exists filter -A SHADOWSOCKS_DNS_GUARD -p udp --dport 53 -j REJECT --reject-with icmp-port-unreachable || return 1
++	append_if_not_exists filter -A SHADOWSOCKS_DNS_GUARD -p tcp --dport 53 -j REJECT --reject-with tcp-reset || return 1
++	if ! iptables -t filter -C FORWARD -j SHADOWSOCKS_DNS_GUARD >/dev/null 2>&1;then
++		iptables -t filter -I FORWARD 1 -j SHADOWSOCKS_DNS_GUARD >/dev/null 2>&1 || return 1
++	fi
++
++	if ip6tables -t filter -L FORWARD >/dev/null 2>&1;then
++		ensure_chain6 filter SHADOWSOCKS6_DNS_GUARD || return 1
++		append_if_not_exists6 filter -A SHADOWSOCKS6_DNS_GUARD -p udp --dport 53 -j REJECT --reject-with icmp6-port-unreachable || return 1
++		append_if_not_exists6 filter -A SHADOWSOCKS6_DNS_GUARD -p tcp --dport 53 -j REJECT --reject-with tcp-reset || return 1
++		if ! ip6tables -t filter -C FORWARD -j SHADOWSOCKS6_DNS_GUARD >/dev/null 2>&1;then
++			ip6tables -t filter -I FORWARD 1 -j SHADOWSOCKS6_DNS_GUARD >/dev/null 2>&1 || return 1
++		fi
++	else
++		echo_date "DNS Guard：当前固件不可用ip6tables filter，已跳过IPv6明文DNS阻断。"
++	fi
++
++	if [ "${ss_basic_dns_guard_mode}" = "2" ];then
++		echo_date "DNS Guard严格模式：阻止路由器自身发出明文DNS..."
++		ensure_chain filter SHADOWSOCKS_DNS_GUARD_OUT || return 1
++		append_if_not_exists filter -A SHADOWSOCKS_DNS_GUARD_OUT -d 127.0.0.0/8 -j RETURN || return 1
++		append_if_not_exists filter -A SHADOWSOCKS_DNS_GUARD_OUT -p udp --dport 53 -j REJECT --reject-with icmp-port-unreachable || return 1
++		append_if_not_exists filter -A SHADOWSOCKS_DNS_GUARD_OUT -p tcp --dport 53 -j REJECT --reject-with tcp-reset || return 1
++		if ! iptables -t filter -C OUTPUT -j SHADOWSOCKS_DNS_GUARD_OUT >/dev/null 2>&1;then
++			iptables -t filter -I OUTPUT 1 -j SHADOWSOCKS_DNS_GUARD_OUT >/dev/null 2>&1 || return 1
++		fi
++		if ip6tables -t filter -L SHADOWSOCKS6_DNS_GUARD >/dev/null 2>&1;then
++			ensure_chain6 filter SHADOWSOCKS6_DNS_GUARD_OUT || return 1
++			append_if_not_exists6 filter -A SHADOWSOCKS6_DNS_GUARD_OUT -d ::1/128 -j RETURN || return 1
++			append_if_not_exists6 filter -A SHADOWSOCKS6_DNS_GUARD_OUT -p udp --dport 53 -j REJECT --reject-with icmp6-port-unreachable || return 1
++			append_if_not_exists6 filter -A SHADOWSOCKS6_DNS_GUARD_OUT -p tcp --dport 53 -j REJECT --reject-with tcp-reset || return 1
++			if ! ip6tables -t filter -C OUTPUT -j SHADOWSOCKS6_DNS_GUARD_OUT >/dev/null 2>&1;then
++				ip6tables -t filter -I OUTPUT 1 -j SHADOWSOCKS6_DNS_GUARD_OUT >/dev/null 2>&1 || return 1
++			fi
++		fi
++	fi
++}
++
+ flush_iptables() {
+ 	# use different xtables libdir
+ 	local restore_v4="/tmp/fss_iptables_flush.$$"
+@@ -6307,7 +6385,7 @@ _start_iptables() {
+ 	# 创建SHADOWSOCKS nat rule
+ 	ensure_chain nat SHADOWSOCKS 
+ 
+-	if [ "$ss_basic_dns_hijack" == "1" ]; then
++	if [ "$ss_basic_dns_hijack" == "1" ] || [ "${ss_basic_dns_guard_mode}" = "1" ] || [ "${ss_basic_dns_guard_mode}" = "2" ]; then
+ 		for VLAN_INDEX in $VLAN_INDEXS
+ 		do
+ 			# iptables -t nat -N SHADOWSOCKS_DNS_${VLAN_INDEX}
+@@ -6551,15 +6629,18 @@ _start_iptables() {
+ 	# FOR FILTER
+ 	insert_if_not_exists filter -I FORWARD 1 -p udp --dport 443 -j SHADOWSOCKS
+ 
+-	if [ "$ss_basic_dns_hijack" == "1" ]; then
++	if [ "$ss_basic_dns_hijack" == "1" ] || [ "${ss_basic_dns_guard_mode}" = "1" ] || [ "${ss_basic_dns_guard_mode}" = "2" ]; then
+ 		echo_date "开启DNS劫持功能功能，防止DNS污染..."
+ 		#INSET_NU_DNS=$(expr "${INSET_NU}" + 1)
+ 		local INSET_NU_DNS=$((${INSET_NU} + 1))
+ 		#append_if_not_exists nat -I PREROUTING "$INSET_NU_DNS" -p udp ! -s ${lan_ipaddr} --dport 53 -j SHADOWSOCKS_DNS
+ 		for VLAN_INDEX in ${VLAN_INDEXS}
+ 		do
+-			iptables -t nat -I PREROUTING "${INSET_NU_DNS}" -i br${VLAN_INDEX} -p udp -m udp --dport 53 -j SHADOWSOCKS_DNS_${VLAN_INDEX}
+-			let INSET_NU_DNS+=1
++			for protocol in udp tcp; do
++				[ "${protocol}" = "tcp" ] && [ "${ss_basic_dns_guard_mode}" != "1" ] && [ "${ss_basic_dns_guard_mode}" != "2" ] && continue
++				iptables -t nat -I PREROUTING "${INSET_NU_DNS}" -i br${VLAN_INDEX} -p ${protocol} --dport 53 -j SHADOWSOCKS_DNS_${VLAN_INDEX}
++				let INSET_NU_DNS+=1
++			done
+ 		done
+ 	else
+ 		echo_date "DNS劫持功能未开启，建议开启！"
+@@ -6577,6 +6658,7 @@ _start_iptables() {
+ 			fallback_ipv6_proxy_to_ipv4 || return 1
+ 		fi
+ 	fi
++	dns_guard_filter_control || return 1
+ }
+ 
+ _start_ipv6_iptables() {
+@@ -6604,7 +6686,7 @@ _start_ipv6_iptables() {
+ 	#-----------------------FOR NAT TCP---------------------
+ 	ensure_chain6 nat SHADOWSOCKS6 || return 1
+ 	append_if_not_exists6 nat -A SHADOWSOCKS6 -p tcp -m set --match-set ignlist6 dst -j RETURN || return 1
+-	if [ "$ss_basic_dns_hijack" == "1" ]; then
++	if [ "$ss_basic_dns_hijack" == "1" ] || [ "${ss_basic_dns_guard_mode}" = "1" ] || [ "${ss_basic_dns_guard_mode}" = "2" ]; then
+ 		for VLAN_INDEX in ${VLAN_INDEXS}
+ 		do
+ 			ensure_chain6 nat SHADOWSOCKS6_DNS_${VLAN_INDEX} || return 1
+@@ -6759,8 +6841,11 @@ _start_ipv6_iptables() {
+ 		do
+ 			local br_ipv6=$(ip -6 addr show dev br${VLAN_INDEX} scope global 2>/dev/null | awk '/inet6/ {print $2}' | head -n1)
+ 			[ -z "${br_ipv6}" ] && continue
+-			ip6tables -t nat -I PREROUTING "${INSET_NU_DNS6}" -i br${VLAN_INDEX} -p udp -m udp --dport 53 -j SHADOWSOCKS6_DNS_${VLAN_INDEX} >/dev/null 2>&1 || return 1
+-			let INSET_NU_DNS6+=1
++			for protocol in udp tcp; do
++				[ "${protocol}" = "tcp" ] && [ "${ss_basic_dns_guard_mode}" != "1" ] && [ "${ss_basic_dns_guard_mode}" != "2" ] && continue
++				ip6tables -t nat -I PREROUTING "${INSET_NU_DNS6}" -i br${VLAN_INDEX} -p ${protocol} --dport 53 -j SHADOWSOCKS6_DNS_${VLAN_INDEX} >/dev/null 2>&1 || return 1
++				let INSET_NU_DNS6+=1
++			done
+ 		done
+ 	else
+ 		echo_date "IPv6 DNS劫持功能未开启，建议开启！"
+diff --git a/fancyss/webs/Module_shadowsocks.asp b/fancyss/webs/Module_shadowsocks.asp
+index 356a719..37f59a4 100644
+--- a/fancyss/webs/Module_shadowsocks.asp
++++ b/fancyss/webs/Module_shadowsocks.asp
+@@ -7054,6 +7054,7 @@ function save() {
+ 	  "ss_basic_interval",
+ 	  "ss_basic_row",
+ 	  "ss_basic_dns_plan",
++	  "ss_basic_dns_guard_mode",
+ 	  "ss_basic_chng_china_net_1_typ",
+ 	  "ss_basic_chng_china_udp_1_opt",
+ 	  "ss_basic_chng_china_udp_1_usr",
+@@ -7214,6 +7215,10 @@ function save() {
+ 	if (!collect_smartdns_dns_groups_for_save(dbus)) {
+ 		return false;
+ 	}
++	if (dbus["ss_basic_dns_guard_mode"] == "1" || dbus["ss_basic_dns_guard_mode"] == "2") {
++		dbus["ss_basic_dns_plan"] = "2";
++		dbus["ss_basic_dns_hijack"] = "1";
++	}
+ 	// data need base64 encode, format b with plain text
+ 	for (var i = 0; i < params_base64.length; i++) {
+ 		dbus[params_base64[i]] = Base64.encode(E(params_base64[i]).value);
+@@ -17126,8 +17131,16 @@ function toggleKeyMask(o, show){
+ 															{ title: '&nbsp;&nbsp;*gfw组DNS', class:'new_dns smrt', suffix: '<div id="smartdns_gfw_chips" class="smartdns-chip-wrap"></div>'},
+ 															{ title: '&nbsp;&nbsp;*屏蔽BlockList域名解析', id:'ss_basic_block_resov', type:'checkbox', hint:'104', func:'u', value:false},
+ 															{ title: '&nbsp;&nbsp;*替换dnsmasq(实验特性)', id:'ss_basic_dns_serverx', type:'checkbox', hint:'105', func:'u', value:false},
+-															{ title: '<em>其它DNS相关设置</em>', th:'2'},
+-															{ title: 'DNS重定向', id:'ss_basic_dns_hijack', type:'checkbox', hint:'106', value:true},
++													{ title: '<em>其它DNS相关设置</em>', th:'2'},
++													{ title: '防运营商DNS劫持', hint:'106', multi: [
++														{ id: 'ss_basic_dns_guard_mode', type:'select', func:'u', options:[
++															['0', '关闭'],
++															['1', '标准模式（推荐）'],
++															['2', '严格模式']
++														], style:'width:180px;', value:'0'},
++														{ suffix:'&nbsp;&nbsp;<small>自动使用SmartDNS + DoT；严格模式额外封锁路由器明文53端口</small>'}
++													]},
++													{ title: 'DNS重定向', id:'ss_basic_dns_hijack', type:'checkbox', hint:'106', value:true},
+ 															{ title: 'DNS解析测试', rid: 'ss_dns_test', multi: [
+ 																{ suffix:'<a type="button" class="ss_btn" style="cursor:pointer" onclick="dns_test(1)">测试cdn</a>&nbsp;&nbsp;'},
+ 																{ suffix:'<a type="button" class="ss_btn" style="cursor:pointer" onclick="dns_test(2)">测试apple china</a>&nbsp;&nbsp;'},
+diff --git a/tests/test_dns_guard.sh b/tests/test_dns_guard.sh
+new file mode 100755
+index 0000000..133b574
+--- /dev/null
++++ b/tests/test_dns_guard.sh
+@@ -0,0 +1,108 @@
++#!/bin/sh
++
++set -eu
++
++ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
++TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fancyss-dnsguard-test.XXXXXX")
++
++cleanup() {
++	rm -rf "${TMP_DIR}"
++}
++trap cleanup EXIT INT TERM
++
++run() {
++	"$@"
++}
++
++echo_date() {
++	:
++}
++
++proxy_core_supports_udp() {
++	return 0
++}
++
++# ss_base_dns.sh contains function definitions and constants only, so it is safe
++# to load in this isolated test shell.
++. "${ROOT_DIR}/fancyss/scripts/ss_base_dns.sh"
++
++ss_basic_dns_guard_mode=1
++
++chn_json=$(smartdns_group_json chn)
++gfw_json=$(smartdns_group_json gfw)
++
++printf '%s' "${chn_json}" | jq -e '
++	(.items | length) == 2 and
++	all(.items[]; .proto == "dot" and .port == 853 and (.host_ip | length) > 0)
++' >/dev/null
++
++printf '%s' "${gfw_json}" | jq -e '
++	(.items | length) == 2 and
++	all(.items[]; .proto == "dot" and .port == 853 and (.host_ip | length) > 0)
++' >/dev/null
++
++grep -q 'ss_basic_dns_guard_mode' "${ROOT_DIR}/fancyss/webs/Module_shadowsocks.asp"
++grep -q 'dns_guard_filter_control' "${ROOT_DIR}/fancyss/ss/ssconfig.sh"
++grep -q 'line="server-tls \${host}"' "${ROOT_DIR}/fancyss/ss/ssconfig.sh"
++grep -q 'line="\${line} -host-ip \${host_ip}"' "${ROOT_DIR}/fancyss/ss/ssconfig.sh"
++
++FW_LOG="${TMP_DIR}/firewall.log"
++: > "${FW_LOG}"
++
++iptables() {
++	printf 'iptables %s\n' "$*" >> "${FW_LOG}"
++	case " $* " in
++	*' -C '*) return 1 ;;
++	*) return 0 ;;
++	esac
++}
++
++ip6tables() {
++	printf 'ip6tables %s\n' "$*" >> "${FW_LOG}"
++	case " $* " in
++	*' -C '*) return 1 ;;
++	*) return 0 ;;
++	esac
++}
++
++ensure_chain() {
++	printf 'ensure_chain %s\n' "$*" >> "${FW_LOG}"
++}
++
++ensure_chain6() {
++	printf 'ensure_chain6 %s\n' "$*" >> "${FW_LOG}"
++}
++
++append_if_not_exists() {
++	printf 'append4 %s\n' "$*" >> "${FW_LOG}"
++}
++
++append_if_not_exists6() {
++	printf 'append6 %s\n' "$*" >> "${FW_LOG}"
++}
++
++eval "$(sed -n '/^dns_guard_filter_control() {/,/^flush_iptables() {/p' "${ROOT_DIR}/fancyss/ss/ssconfig.sh" | sed '$d')"
++
++ss_basic_dns_guard_mode=1
++dns_guard_filter_control
++grep -q 'iptables -t filter -I FORWARD 1 -j SHADOWSOCKS_DNS_GUARD' "${FW_LOG}"
++grep -q 'ip6tables -t filter -I FORWARD 1 -j SHADOWSOCKS6_DNS_GUARD' "${FW_LOG}"
++if grep -q 'DNS_GUARD_OUT' "${FW_LOG}"; then
++	echo "Standard mode unexpectedly installed strict OUTPUT rules" >&2
++	exit 1
++fi
++
++: > "${FW_LOG}"
++ss_basic_dns_guard_mode=2
++dns_guard_filter_control
++grep -q 'iptables -t filter -I OUTPUT 1 -j SHADOWSOCKS_DNS_GUARD_OUT' "${FW_LOG}"
++grep -q 'ip6tables -t filter -I OUTPUT 1 -j SHADOWSOCKS6_DNS_GUARD_OUT' "${FW_LOG}"
++
++return_line=$(grep -n 'append4 filter -A SHADOWSOCKS_DNS_GUARD_OUT -d 127.0.0.0/8 -j RETURN' "${FW_LOG}" | cut -d: -f1)
++reject_line=$(grep -n 'append4 filter -A SHADOWSOCKS_DNS_GUARD_OUT -p udp --dport 53 -j REJECT' "${FW_LOG}" | cut -d: -f1)
++if [ "${return_line}" -ge "${reject_line}" ]; then
++	echo "Strict mode loopback exception is ordered after its reject rule" >&2
++	exit 1
++fi
++
++echo "DNS Guard tests passed"
+-- 
+2.50.1 (Apple Git-155)
+
